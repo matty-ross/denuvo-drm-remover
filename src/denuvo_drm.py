@@ -1,4 +1,5 @@
 import json
+import struct
 
 import pefile
 
@@ -16,8 +17,13 @@ class DenuvoDRM:
 
 
     def fix_imports(self) -> None:
+        denuvo_sections: list[str] = self._config['denuvo_sections']
+        
         imports = self._map_denuvo_to_original_imports()
-        # TODO
+        for section in self._pe.sections:
+            denuvo_name = section.Name.rstrip(b'\x00').decode()
+            if denuvo_name in denuvo_sections:
+                self._replace_imports_in_section(imports, section)
     
 
     def fix_pe_header(self) -> None:
@@ -35,12 +41,17 @@ class DenuvoDRM:
 
     def rename_sections(self) -> None:
         sections: dict[str, str] = self._config['sections']
-        
+        denuvo_sections: list[str] = self._config['denuvo_sections']
+
+        index = 1
         for section in self._pe.sections:
             denuvo_name = section.Name.rstrip(b'\x00').decode()
             original_name = sections.get(denuvo_name)
             if original_name:
                 section.Name = original_name.encode().ljust(8, b'\x00')
+            elif denuvo_name in denuvo_sections:
+                section.Name = f'.denuvo{index}'.encode()
+                index += 1
 
 
     def _load_config(self, config_path: str) -> dict:
@@ -54,8 +65,16 @@ class DenuvoDRM:
     
 
     def _map_denuvo_to_original_imports(self) -> dict[int, int]:
+        data_directories: dict[str, dict[str, str]] = self._config['data_directories']
+
+        denuvo_import_directory_entry = self._get_pe_data_directory('IMAGE_DIRECTORY_ENTRY_IMPORT')
+        original_import_directory_entry = data_directories['IMAGE_DIRECTORY_ENTRY_IMPORT']
+
         denuvo_imports = {}
-        denuvo_import_directory = self._pe.parse_import_directory(rva=0x7E892F8, size=0x244) # TODO
+        denuvo_import_directory = self._pe.parse_import_directory(
+            rva=denuvo_import_directory_entry.VirtualAddress,
+            size=denuvo_import_directory_entry.Size,
+        )
         for denuvo_import_descriptor in denuvo_import_directory:
             for denuvo_import in denuvo_import_descriptor.imports:
                 dll = denuvo_import_descriptor.dll.lower()
@@ -63,7 +82,10 @@ class DenuvoDRM:
                 denuvo_imports[denuvo_import.address] = (dll, function)
 
         original_imports = {}
-        original_import_directory = self._pe.parse_import_directory(rva=0xB22AF0, size=0x2D0) # TODO
+        original_import_directory = self._pe.parse_import_directory(
+            rva=int(original_import_directory_entry['address'], 16),
+            size=int(original_import_directory_entry['size'], 16),
+        )
         for original_import_descriptor in original_import_directory:
             for original_import in original_import_descriptor.imports:
                 dll = original_import_descriptor.dll.lower()
@@ -77,3 +99,17 @@ class DenuvoDRM:
                 imports[denuvo_address] = original_address
 
         return imports
+    
+
+    def _replace_imports_in_section(self, imports: dict[int, int], section: pefile.Structure) -> None:
+        fmt = '<L' # TODO: or '<Q'
+        size = 4 # TODO: or 8
+        
+        data = bytearray(self._pe.get_data(section.VirtualAddress, section.SizeOfRawData))
+        
+        for i in range(len(data) - (size - 1)):
+            pointer = struct.unpack(fmt, data[i:i + size])[0]
+            if pointer in imports:
+                data[i:i + size] = struct.pack(fmt, imports[pointer])
+
+        self._pe.set_bytes_at_rva(section.VirtualAddress, bytes(data))
