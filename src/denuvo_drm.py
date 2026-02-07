@@ -73,15 +73,8 @@ def _map_denuvo_to_original_imports(pe: pefile.PE, config: DenuvoDrmConfig) -> d
 
 
 def _replace_imports_in_section(pe: pefile.PE, section: pefile.Structure, imports: dict[int, int]) -> None:
-    match pe.OPTIONAL_HEADER.Magic:
-        case pefile.OPTIONAL_HEADER_MAGIC_PE:
-            pointer_format = '<L'
-            pointer_size = 4
-        case pefile.OPTIONAL_HEADER_MAGIC_PE_PLUS:
-            pointer_format = '<Q'
-            pointer_size = 8
-        case _:
-            return
+    pointer_format = _get_pe_pointer_format(pe)
+    pointer_size = struct.calcsize(pointer_format)
 
     data = bytearray(pe.get_data(section.VirtualAddress, section.SizeOfRawData))
 
@@ -91,6 +84,15 @@ def _replace_imports_in_section(pe: pefile.PE, section: pefile.Structure, import
             struct.pack_into(pointer_format, data, offset, imports[pointer])
 
     pe.set_bytes_at_rva(section.VirtualAddress, bytes(data))
+
+
+def _get_pe_pointer_format(pe: pefile.PE) -> str:
+    match pe.OPTIONAL_HEADER.Magic:
+        case pefile.OPTIONAL_HEADER_MAGIC_PE:
+            return '<L'
+        case pefile.OPTIONAL_HEADER_MAGIC_PE_PLUS:
+            return '<Q'
+    raise Exception("Invalid PE file.")
 
 
 def _get_pe_data_directory(pe: pefile.PE, data_directory_name: str) -> pefile.Structure:
